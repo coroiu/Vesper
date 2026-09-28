@@ -1,4 +1,4 @@
-name: Build Windows
+name: Build Vesper
 
 on:
   push:
@@ -96,13 +96,14 @@ jobs:
           cd build
           cpack -G NSIS
           cpack -G ZIP
-          mv ./cpack_artifacts/Apollo.exe "../artifacts/Apollo-${{ steps.version.outputs.name }}-installer.exe"
-          mv ./cpack_artifacts/Apollo.zip "../artifacts/Apollo-${{ steps.version.outputs.name }}-portable.zip"
+          # CPack still names the packages after the internal Apollo project name
+          mv ./cpack_artifacts/Apollo.exe "../artifacts/Vesper-${{ steps.version.outputs.name }}-installer.exe"
+          mv ./cpack_artifacts/Apollo.zip "../artifacts/Vesper-${{ steps.version.outputs.name }}-portable.zip"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: apollo-windows-${{ steps.version.outputs.name }}
+          name: vesper-windows-${{ steps.version.outputs.name }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 90
@@ -124,6 +125,6 @@ jobs:
             exit 0
           fi
           gh release create "$TAG" artifacts/* \
-            --title "Apollo $NAME" \
+            --title "Vesper $NAME" \
             --generate-notes \
             --target "$GITHUB_SHA"
