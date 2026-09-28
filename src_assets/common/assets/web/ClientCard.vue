@@ -23,8 +23,8 @@
         {
             platform: 'Android',
             icon: 'fa-brands fa-android',
-            name: 'Artemis',
-            link: 'https://github.com/ClassicOldSong/moonlight-android'
+            name: 'Twilight',
+            link: 'https://github.com/coroiu/twilight-android'
         },
         {
             platform: 'iOS',
