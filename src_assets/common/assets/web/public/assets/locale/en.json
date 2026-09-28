@@ -454,6 +454,9 @@
     "virtual_sink": "Virtual Sink",
     "virtual_sink_desc": "The audio device to be used when audio output isn't allowed on host by the client.\nIf unset, the device is chosen automatically.\nWe strongly recommend leaving this field blank to use automatic device selection!",
     "virtual_sink_placeholder": "Steam Streaming Speakers",
+    "virtual_mic": "Virtual Microphone",
+    "virtual_mic_desc": "The playback device that client microphone audio is sent to. Pick the output end of a virtual cable, and select its input end as the microphone in your apps.\nIf unset, Steam Streaming Microphone or VB-Audio Virtual Cable is used if present.\nClients also need the Microphone permission.",
+    "virtual_mic_placeholder": "Steam Streaming Microphone",
     "vt_coder": "VideoToolbox Coder",
     "vt_realtime": "VideoToolbox Realtime Encoding",
     "vt_software": "VideoToolbox Software Encoding",
@@ -510,6 +513,7 @@
     "file_upload": "File Upload",
     "file_dwnload": "File Download",
     "server_cmd": "Server Command",
+    "microphone": "Microphone",
     "list": "List Apps",
     "view": "View Streams",
     "launch": "Launch Apps"

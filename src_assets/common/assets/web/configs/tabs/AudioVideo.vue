@@ -76,6 +76,13 @@ const validateFallbackMode = (event) => {
                  v-model="config.virtual_sink" />
           <div class="form-text pre-wrap">{{ $t('config.virtual_sink_desc') }}</div>
         </div>
+        <!-- Virtual Microphone -->
+        <div class="mb-3">
+          <label for="virtual_mic" class="form-label">{{ $t('config.virtual_mic') }}</label>
+          <input type="text" class="form-control" id="virtual_mic" :placeholder="$t('config.virtual_mic_placeholder')"
+                 v-model="config.virtual_mic" />
+          <div class="form-text pre-wrap">{{ $t('config.virtual_mic_desc') }}</div>
+        </div>
         <!-- Install Steam Audio Drivers -->
         <Checkbox class="mb-3"
                   id="install_steam_audio_drivers"

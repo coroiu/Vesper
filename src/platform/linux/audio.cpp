@@ -522,4 +522,12 @@ namespace platf {
 
     return audio;
   }
+
+  bool has_virtual_microphone() {
+    return false;
+  }
+
+  std::unique_ptr<virtual_mic_t> virtual_microphone() {
+    return nullptr;
+  }
 }  // namespace platf

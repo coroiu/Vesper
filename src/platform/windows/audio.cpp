@@ -5,7 +5,11 @@
 #define INITGUID
 
 // standard includes
+#include <atomic>
+#include <deque>
 #include <format>
+#include <mutex>
+#include <thread>
 
 // platform includes
 #include <Audioclient.h>
@@ -40,6 +44,7 @@ namespace {
 
   constexpr auto SAMPLE_RATE = 48000;
   constexpr auto STEAM_AUDIO_DRIVER_PATH = L"%CommonProgramFiles(x86)%\\Steam\\drivers\\Windows10\\" STEAM_DRIVER_SUBDIR L"\\SteamStreamingSpeakers.inf";
+  constexpr auto STEAM_MIC_DRIVER_PATH = L"%CommonProgramFiles(x86)%\\Steam\\drivers\\Windows10\\" STEAM_DRIVER_SUBDIR L"\\SteamStreamingMicrophone.inf";
 
   constexpr auto waveformat_mask_stereo = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
 
@@ -218,6 +223,7 @@ namespace platf::audio {
   using collection_t = util::safe_ptr<IMMDeviceCollection, Release<IMMDeviceCollection>>;
   using audio_client_t = util::safe_ptr<IAudioClient, Release<IAudioClient>>;
   using audio_capture_t = util::safe_ptr<IAudioCaptureClient, Release<IAudioCaptureClient>>;
+  using audio_render_t = util::safe_ptr<IAudioRenderClient, Release<IAudioRenderClient>>;
   using wave_format_t = util::safe_ptr<WAVEFORMATEX, co_task_free<WAVEFORMATEX>>;
   using wstring_t = util::safe_ptr<WCHAR, co_task_free<WCHAR>>;
   using handle_t = util::safe_ptr_v2<void, BOOL, CloseHandle>;
@@ -896,6 +902,20 @@ namespace platf::audio {
       };
     }
 
+    /**
+     * @brief Render endpoints of known virtual cables whose other end is a microphone.
+     */
+    audio_control_t::match_fields_list_t match_virtual_mic() {
+      if (!config::audio.virtual_mic.empty()) {
+        return match_all_fields(from_utf8(config::audio.virtual_mic));
+      }
+
+      return {
+        {match_field_e::adapter_friendly_name, L"Steam Streaming Microphone"},
+        {match_field_e::adapter_friendly_name, L"VB-Audio Virtual Cable"},
+      };
+    }
+
     audio_control_t::match_fields_list_t match_all_fields(const std::wstring &name) {
       return {
         {match_field_e::device_id, name},  // {0.0.0.00000000}.{29dd7668-45b2-4846-882d-950f55bf7eb8}
@@ -1047,6 +1067,34 @@ namespace platf::audio {
      */
     bool install_steam_audio_drivers() {
 #ifdef STEAM_DRIVER_SUBDIR
+      return install_steam_driver(STEAM_AUDIO_DRIVER_PATH, "Steam Streaming Speakers"sv);
+#else
+      BOOST_LOG(warning) << "Unable to install Steam Streaming Speakers on unknown architecture"sv;
+      return false;
+#endif
+    }
+
+    /**
+     * @brief Installs the Steam Streaming Microphone driver, if present.
+     * @return `true` if installation was successful.
+     */
+    bool install_steam_mic_driver() {
+#ifdef STEAM_DRIVER_SUBDIR
+      return install_steam_driver(STEAM_MIC_DRIVER_PATH, "Steam Streaming Microphone"sv);
+#else
+      BOOST_LOG(warning) << "Unable to install Steam Streaming Microphone on unknown architecture"sv;
+      return false;
+#endif
+    }
+
+    /**
+     * @brief Installs one of the Steam audio drivers from the Steam installation directory.
+     * @param inf_path Path to the driver INF, with environment variables unexpanded.
+     * @param driver_name Name of the driver for logging.
+     * @return `true` if installation was successful.
+     */
+    bool install_steam_driver(const wchar_t *inf_path, std::string_view driver_name) {
+#ifdef STEAM_DRIVER_SUBDIR
       // MinGW's libnewdev.a is missing DiInstallDriverW() even though the headers have it,
       // so we have to load it at runtime. It's Vista or later, so it will always be available.
       auto newdev = LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -1067,11 +1115,11 @@ namespace platf::audio {
       // Get the current default audio device (if present)
       auto old_default_dev = default_device(device_enum);
 
-      // Install the Steam Streaming Speakers driver
+      // Install the driver
       WCHAR driver_path[MAX_PATH] = {};
-      ExpandEnvironmentStringsW(STEAM_AUDIO_DRIVER_PATH, driver_path, ARRAYSIZE(driver_path));
+      ExpandEnvironmentStringsW(inf_path, driver_path, ARRAYSIZE(driver_path));
       if (fn_DiInstallDriverW(nullptr, driver_path, 0, nullptr)) {
-        BOOST_LOG(info) << "Successfully installed Steam Streaming Speakers"sv;
+        BOOST_LOG(info) << "Successfully installed "sv << driver_name;
 
         // Wait for 5 seconds to allow the audio subsystem to reconfigure things before
         // modifying the default audio device or enumerating devices again.
@@ -1093,7 +1141,7 @@ namespace platf::audio {
         auto err = GetLastError();
         switch (err) {
           case ERROR_ACCESS_DENIED:
-            BOOST_LOG(warning) << "Administrator privileges are required to install Steam Streaming Speakers"sv;
+            BOOST_LOG(warning) << "Administrator privileges are required to install "sv << driver_name;
             break;
           case ERROR_FILE_NOT_FOUND:
           case ERROR_PATH_NOT_FOUND:
@@ -1150,6 +1198,150 @@ namespace platf::audio {
     audio::device_enum_t device_enum;
     std::string assigned_sink;
   };
+
+  /**
+   * @brief Plays client microphone audio into the render endpoint of a virtual cable.
+   *
+   * Samples are queued by write() and drained by a dedicated render thread. After the
+   * queue runs dry we wait for a small prebuffer before playing again, which absorbs
+   * network jitter. The queue is capped so clock drift can't build up latency.
+   */
+  class virtual_mic_wasapi_t: public virtual_mic_t {
+  public:
+    static constexpr std::size_t PREBUFFER_SAMPLES = SAMPLE_RATE * 30 / 1000;
+    static constexpr std::size_t MAX_QUEUED_SAMPLES = SAMPLE_RATE * 150 / 1000;
+
+    explicit virtual_mic_wasapi_t(std::wstring device_id):
+        device_id {std::move(device_id)} {
+      render_thread = std::thread {&virtual_mic_wasapi_t::render, this};
+    }
+
+    ~virtual_mic_wasapi_t() override {
+      stop = true;
+      if (render_thread.joinable()) {
+        render_thread.join();
+      }
+    }
+
+    void write(const float *samples, std::size_t count) override {
+      std::lock_guard lg {queue_mutex};
+      queue.insert(std::end(queue), samples, samples + count);
+
+      if (queue.size() > MAX_QUEUED_SAMPLES) {
+        // Keep the newest audio, trimmed back to the prebuffer depth
+        queue.erase(std::begin(queue), std::end(queue) - PREBUFFER_SAMPLES);
+      }
+    }
+
+  private:
+    void render() {
+      co_init_t co_init;
+
+      device_enum_t device_enum;
+      auto status = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void **) &device_enum);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Virtual mic: couldn't create device enumerator: [0x"sv << util::hex(status).to_string_view() << ']';
+        return;
+      }
+
+      device_t device;
+      status = device_enum->GetDevice(device_id.c_str(), &device);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Virtual mic: couldn't open device: [0x"sv << util::hex(status).to_string_view() << ']';
+        return;
+      }
+
+      audio_client_t audio_client;
+      status = device->Activate(IID_IAudioClient, CLSCTX_ALL, nullptr, (void **) &audio_client);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Virtual mic: couldn't activate device: [0x"sv << util::hex(status).to_string_view() << ']';
+        return;
+      }
+
+      auto waveformat = create_waveformat(sample_format_e::f32, 1, SPEAKER_FRONT_CENTER);
+      status = audio_client->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        40 * 10000,  // 40 ms device buffer, in 100 ns units
+        0,
+        (LPWAVEFORMATEX) &waveformat,
+        nullptr
+      );
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Virtual mic: couldn't initialize audio client: [0x"sv << util::hex(status).to_string_view() << ']';
+        return;
+      }
+
+      UINT32 buffer_frames = 0;
+      audio_client->GetBufferSize(&buffer_frames);
+
+      audio_render_t audio_render;
+      status = audio_client->GetService(IID_IAudioRenderClient, (void **) &audio_render);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Virtual mic: couldn't get render client: [0x"sv << util::hex(status).to_string_view() << ']';
+        return;
+      }
+
+      handle_t event {CreateEventA(nullptr, FALSE, FALSE, nullptr)};
+      audio_client->SetEventHandle(event.get());
+
+      DWORD task_index = 0;
+      auto mmcss_handle = AvSetMmThreadCharacteristics("Pro Audio", &task_index);
+
+      audio_client->Start();
+      BOOST_LOG(info) << "Virtual mic: playing client microphone audio"sv;
+
+      bool primed = false;
+      while (!stop) {
+        if (WaitForSingleObjectEx(event.get(), 100, FALSE) != WAIT_OBJECT_0) {
+          continue;
+        }
+
+        UINT32 padding = 0;
+        if (FAILED(audio_client->GetCurrentPadding(&padding))) {
+          break;
+        }
+
+        std::lock_guard lg {queue_mutex};
+        if (!primed && queue.size() >= PREBUFFER_SAMPLES) {
+          primed = true;
+        }
+        if (!primed) {
+          continue;
+        }
+
+        auto frames = std::min<std::size_t>(buffer_frames - padding, queue.size());
+        if (frames == 0) {
+          primed = !queue.empty();
+          continue;
+        }
+
+        BYTE *data = nullptr;
+        if (FAILED(audio_render->GetBuffer((UINT32) frames, &data))) {
+          break;
+        }
+        std::copy_n(std::begin(queue), frames, (float *) data);
+        audio_render->ReleaseBuffer((UINT32) frames, 0);
+        queue.erase(std::begin(queue), std::begin(queue) + frames);
+
+        if (queue.empty()) {
+          primed = false;
+        }
+      }
+
+      audio_client->Stop();
+      if (mmcss_handle) {
+        AvRevertMmThreadCharacteristics(mmcss_handle);
+      }
+    }
+
+    std::wstring device_id;
+    std::thread render_thread;
+    std::atomic_bool stop {false};
+
+    std::mutex queue_mutex;
+    std::deque<float> queue;
+  };
 }  // namespace platf::audio
 
 namespace platf {
@@ -1176,6 +1368,26 @@ namespace platf {
     return control;
   }
 
+  bool has_virtual_microphone() {
+    audio::audio_control_t control;
+    return control.init() == 0 && control.find_device_id(control.match_virtual_mic());
+  }
+
+  std::unique_ptr<virtual_mic_t> virtual_microphone() {
+    audio::audio_control_t control;
+    if (control.init()) {
+      return nullptr;
+    }
+
+    auto matched = control.find_device_id(control.match_virtual_mic());
+    if (!matched) {
+      BOOST_LOG(warning) << "No virtual microphone device found for client mic passthrough"sv;
+      return nullptr;
+    }
+
+    return std::make_unique<audio::virtual_mic_wasapi_t>(matched->second);
+  }
+
   std::unique_ptr<deinit_t> init() {
     if (dxgi::init()) {
       return nullptr;
@@ -1189,6 +1401,13 @@ namespace platf {
     audio::audio_control_t audio_ctrl;
     if (audio_ctrl.init() == 0) {
       audio_ctrl.reset_default_device();
+
+      // Install Steam Streaming Microphone for client mic passthrough if there is no virtual
+      // mic yet. This is best effort, and a no-op if Steam isn't installed.
+      if (config::audio.install_steam_drivers && config::audio.virtual_mic.empty() &&
+          !audio_ctrl.find_device_id(audio_ctrl.match_virtual_mic())) {
+        audio_ctrl.install_steam_mic_driver();
+      }
     }
 
     return co_init;

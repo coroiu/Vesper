@@ -35,6 +35,8 @@ namespace stream {
 
     uint32_t encryptionFlagsEnabled;
 
+    bool micEnabled;  ///< Twilight microphone passthrough was negotiated
+
     std::optional<int> gcmap;
   };
 

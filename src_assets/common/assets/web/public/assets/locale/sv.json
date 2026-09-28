@@ -414,6 +414,9 @@
     "virtual_sink": "Virtuell ljudmottagare",
     "virtual_sink_desc": "Ljudenheten som ska användas när ljudutmatning inte tillåts på värden av klienten.\nOm ej inställd väljs enheten automatiskt.\nVi rekommenderar starkt att lämna detta fält tomt för att använda automatiskt enhetsval!",
     "virtual_sink_placeholder": "Steam Streaming Högtalare",
+    "virtual_mic": "Virtuell mikrofon",
+    "virtual_mic_desc": "Uppspelningsenheten som klientens mikrofonljud skickas till. Välj utgångsänden av en virtuell kabel och välj dess ingångsände som mikrofon i dina appar.\nOm ej inställd används Steam Streaming Microphone eller VB-Audio Virtual Cable om de finns.\nKlienter behöver även behörigheten Mikrofon.",
+    "virtual_mic_placeholder": "Steam Streaming Microphone",
     "vt_coder": "VideoToolbox-kodare",
     "vt_realtime": "VideoToolbox realtidskodning",
     "vt_software": "VideoToolbox mjukvarukodning",
@@ -470,6 +473,7 @@
     "file_upload": "Filuppladdning",
     "file_dwnload": "Filnedladdning",
     "server_cmd": "Serverkommando",
+    "microphone": "Mikrofon",
     "list": "Lista appar",
     "view": "Visa strömmar",
     "launch": "Starta appar"

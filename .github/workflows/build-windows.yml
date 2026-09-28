@@ -1,0 +1,129 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [ '**' ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+# Needed to create the release and push its tag on the default branch.
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  # Never cancel a default-branch run: it publishes a release.
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history: the build number is the commit count, and the
+          # release step pushes a tag.
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Upstream Apollo release this fork is based on, plus the commit count
+          # so every build is newer than the last.
+          BASE=0.4.8
+          COUNT=$(git rev-list --count HEAD)
+          NAME="$BASE.$COUNT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NAME" >> "$GITHUB_OUTPUT"
+          echo "Building $NAME"
+
+      # The official Node.js build; MSYS2's nodejs crashes during process init
+      # (see docs/building.md).
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          # Keep the Windows PATH so CMake can find the official node/npm
+          path-type: inherit
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build
+        env:
+          BRANCH: ${{ github.ref_name }}
+          BUILD_VERSION: ${{ steps.version.outputs.name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          cmake -B build -G Ninja -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DSUNSHINE_PUBLISHER_NAME='${{ github.repository_owner }}' \
+            -DSUNSHINE_PUBLISHER_WEBSITE='https://github.com/${{ github.repository }}' \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL='https://github.com/${{ github.repository }}/issues'
+          ninja -C build
+
+      - name: Package
+        run: |
+          mkdir -p artifacts
+          cd build
+          cpack -G NSIS
+          cpack -G ZIP
+          mv ./cpack_artifacts/Apollo.exe "../artifacts/Apollo-${{ steps.version.outputs.name }}-installer.exe"
+          mv ./cpack_artifacts/Apollo.zip "../artifacts/Apollo-${{ steps.version.outputs.name }}-portable.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apollo-windows-${{ steps.version.outputs.name }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 90
+
+      # Everything pushed to the default branch becomes a release.
+      - name: Publish release
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists - nothing to publish."
+            exit 0
+          fi
+          gh release create "$TAG" artifacts/* \
+            --title "Apollo $NAME" \
+            --generate-notes \
+            --target "$GITHUB_SHA"

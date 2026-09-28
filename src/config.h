@@ -158,6 +158,7 @@ namespace config {
     bool install_steam_drivers;
     bool keep_default;
     bool auto_capture;
+    std::string virtual_mic;  ///< Render device that feeds a virtual microphone (Twilight mic passthrough)
   };
 
   constexpr int ENCRYPTION_MODE_NEVER = 0;  // Never use video encryption, even if the client supports it

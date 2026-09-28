@@ -93,4 +93,12 @@ namespace platf {
   std::unique_ptr<audio_control_t> audio_control() {
     return std::make_unique<macos_audio_control_t>();
   }
+
+  bool has_virtual_microphone() {
+    return false;
+  }
+
+  std::unique_ptr<virtual_mic_t> virtual_microphone() {
+    return nullptr;
+  }
 }  // namespace platf

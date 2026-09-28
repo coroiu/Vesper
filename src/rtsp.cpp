@@ -27,6 +27,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "platform/common.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -811,6 +812,11 @@ namespace rtsp_stream {
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
     ss << "a=x-ss-general.encryptionRequested:" << encryption_flags_requested << std::endl;
 
+    // Offer Twilight microphone passthrough to clients that are allowed to use it
+    if (!!(session.perm & crypto::PERM::microphone) && platf::has_virtual_microphone()) {
+      ss << "a=x-tw-general.micSupported:1"sv << std::endl;
+    }
+
     if (video::last_encoder_probe_supported_ref_frames_invalidation) {
       ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;
     }
@@ -983,6 +989,7 @@ namespace rtsp_stream {
     args.try_emplace("x-nv-aqos.qosTrafficType"sv, "4"sv);
     args.try_emplace("x-ml-video.configuredBitrateKbps"sv, "0"sv);
     args.try_emplace("x-ss-general.encryptionEnabled"sv, "0"sv);
+    args.try_emplace("x-tw-mic.enabled"sv, "0"sv);
     args.try_emplace("x-ss-video[0].chromaSamplingType"sv, "0"sv);
     args.try_emplace("x-ss-video[0].intraRefresh"sv, "0"sv);
 
@@ -1005,6 +1012,11 @@ namespace rtsp_stream {
       config.audioQosType = util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
       config.videoQosType = util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
       config.encryptionFlagsEnabled = util::from_view(args.at("x-ss-general.encryptionEnabled"sv));
+
+      // Mic audio rides on the control stream, so it needs the V2 control stream encryption
+      config.micEnabled = util::from_view(args.at("x-tw-mic.enabled"sv)) != 0 &&
+                          (config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2) &&
+                          !!(session.perm & crypto::PERM::microphone);
 
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
       if (util::from_view(args.at("x-nv-general.featureFlags"sv)) & 0x20) {

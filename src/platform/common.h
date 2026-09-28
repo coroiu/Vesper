@@ -552,6 +552,19 @@ namespace platf {
     virtual ~mic_t() = default;
   };
 
+  /**
+   * @brief Plays audio received from a client microphone into a virtual microphone device.
+   */
+  class virtual_mic_t {
+  public:
+    /**
+     * @brief Queue mono 48 kHz samples for playback. Must not block for long.
+     */
+    virtual void write(const float *samples, std::size_t count) = 0;
+
+    virtual ~virtual_mic_t() = default;
+  };
+
   class audio_control_t {
   public:
     virtual int set_sink(const std::string &sink) = 0;
@@ -584,6 +597,16 @@ namespace platf {
   std::pair<std::uint16_t, std::string> from_sockaddr_ex(const sockaddr *const);
 
   std::unique_ptr<audio_control_t> audio_control();
+
+  /**
+   * @brief Check whether a virtual microphone device is available for client mic passthrough.
+   */
+  bool has_virtual_microphone();
+
+  /**
+   * @brief Open the virtual microphone device, or return nullptr if there is none.
+   */
+  std::unique_ptr<virtual_mic_t> virtual_microphone();
 
   /**
    * @brief Get the display_t instance for the given hwdevice_type.

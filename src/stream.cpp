@@ -4,12 +4,15 @@
  */
 
 // standard includes
+#include <array>
+#include <cstring>
 #include <fstream>
 #include <future>
 #include <queue>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
+#include <opus/opus.h>
 #include <openssl/err.h>
 
 extern "C" {
@@ -53,6 +56,7 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
+#define IDX_MIC_DATA 19
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -74,6 +78,7 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  0x7700,  // Microphone data (Twilight protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -410,6 +415,15 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
     } control;
+
+    // Twilight microphone passthrough, set up when the first packet arrives
+    struct {
+      std::unique_ptr<platf::virtual_mic_t> sink;
+      util::safe_ptr<OpusDecoder, opus_decoder_destroy> decoder;
+      std::uint32_t next_seq {};
+      int last_frame_size {};
+      bool failed {};
+    } mic;
 
     std::uint32_t launch_session_id;
     std::string device_name;
@@ -1050,6 +1064,72 @@ namespace stream {
         BOOST_LOG(debug) << "Permission File Upload deined for [" << session->device_name << "]";
         return;
       }
+    });
+
+    server->map(packetTypes[IDX_MIC_DATA], [](session_t *session, const std::string_view &payload) {
+      BOOST_LOG(verbose) << "type [IDX_MIC_DATA]"sv;
+
+      if (!session->config.micEnabled) {
+        return;
+      }
+
+      auto &mic = session->mic;
+      if (!(session->permission & crypto::PERM::microphone)) {
+        // The permission can be revoked mid-session, so release the device too
+        mic.sink.reset();
+        return;
+      }
+
+      std::uint32_t seq;
+      if (payload.size() <= sizeof(seq) || mic.failed) {
+        return;
+      }
+      std::memcpy(&seq, payload.data(), sizeof(seq));
+      seq = util::endian::little(seq);
+
+      if (!mic.sink) {
+        int err = OPUS_OK;
+        mic.decoder.reset(opus_decoder_create(48000, 1, &err));
+        mic.sink = platf::virtual_microphone();
+        if (!mic.decoder || !mic.sink) {
+          BOOST_LOG(error) << "Couldn't start microphone passthrough for ["sv << session->device_name << ']';
+          mic.failed = true;
+          mic.sink.reset();
+          return;
+        }
+
+        BOOST_LOG(info) << "Microphone passthrough started for ["sv << session->device_name << ']';
+        mic.next_seq = seq;
+        mic.last_frame_size = 960;
+      }
+
+      // Drop late or duplicated packets
+      auto gap = (std::int32_t) (seq - mic.next_seq);
+      if (gap < 0) {
+        return;
+      }
+
+      // 120 ms is the largest Opus frame
+      std::array<float, 5760> pcm;
+
+      // Conceal a short run of lost packets. After a longer gap, just resume.
+      for (auto x = 0; x < std::min(gap, 5); ++x) {
+        auto samples = opus_decode_float(mic.decoder.get(), nullptr, 0, pcm.data(), mic.last_frame_size, 0);
+        if (samples > 0) {
+          mic.sink->write(pcm.data(), samples);
+        }
+      }
+
+      auto opus_data = (const unsigned char *) payload.data() + sizeof(seq);
+      auto samples = opus_decode_float(mic.decoder.get(), opus_data, (opus_int32) (payload.size() - sizeof(seq)), pcm.data(), (int) pcm.size(), 0);
+      if (samples < 0) {
+        BOOST_LOG(warning) << "Couldn't decode microphone packet: "sv << opus_strerror(samples);
+        return;
+      }
+
+      mic.sink->write(pcm.data(), samples);
+      mic.last_frame_size = samples;
+      mic.next_seq = seq + 1;
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
@@ -2043,6 +2123,10 @@ namespace stream {
       session.audioThread.join();
       BOOST_LOG(debug) << "Waiting for control to end..."sv;
       session.controlEnd.view();
+
+      // Release the virtual microphone now that no more control messages will arrive
+      session.mic.sink.reset();
+
       // Reset input on session stop to avoid stuck repeated keys
       BOOST_LOG(debug) << "Resetting Input..."sv;
       input::reset(session.input);
