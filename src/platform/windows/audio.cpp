@@ -1237,25 +1237,49 @@ namespace platf::audio {
     void render() {
       co_init_t co_init;
 
+      // The endpoint can be invalidated mid-session, e.g. when Steam restarts its
+      // driver or the device format changes, so keep reopening it until we're stopped.
+      bool quiet = false;
+      while (!stop) {
+        quiet = !play(quiet);
+
+        for (auto x = 0; x < 10 && !stop; ++x) {
+          std::this_thread::sleep_for(100ms);
+        }
+      }
+    }
+
+    /**
+     * @brief Open the device and play queued audio until we're stopped or the device fails.
+     * @param quiet Don't log setup errors, because the previous attempt already did.
+     * @return Whether playback started.
+     */
+    bool play(bool quiet) {
       device_enum_t device_enum;
       auto status = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void **) &device_enum);
       if (FAILED(status)) {
-        BOOST_LOG(error) << "Virtual mic: couldn't create device enumerator: [0x"sv << util::hex(status).to_string_view() << ']';
-        return;
+        if (!quiet) {
+          BOOST_LOG(error) << "Virtual mic: couldn't create device enumerator: [0x"sv << util::hex(status).to_string_view() << ']';
+        }
+        return false;
       }
 
       device_t device;
       status = device_enum->GetDevice(device_id.c_str(), &device);
       if (FAILED(status)) {
-        BOOST_LOG(error) << "Virtual mic: couldn't open device: [0x"sv << util::hex(status).to_string_view() << ']';
-        return;
+        if (!quiet) {
+          BOOST_LOG(error) << "Virtual mic: couldn't open device: [0x"sv << util::hex(status).to_string_view() << ']';
+        }
+        return false;
       }
 
       audio_client_t audio_client;
       status = device->Activate(IID_IAudioClient, CLSCTX_ALL, nullptr, (void **) &audio_client);
       if (FAILED(status)) {
-        BOOST_LOG(error) << "Virtual mic: couldn't activate device: [0x"sv << util::hex(status).to_string_view() << ']';
-        return;
+        if (!quiet) {
+          BOOST_LOG(error) << "Virtual mic: couldn't activate device: [0x"sv << util::hex(status).to_string_view() << ']';
+        }
+        return false;
       }
 
       auto waveformat = create_waveformat(sample_format_e::f32, 1, SPEAKER_FRONT_CENTER);
@@ -1268,8 +1292,10 @@ namespace platf::audio {
         nullptr
       );
       if (FAILED(status)) {
-        BOOST_LOG(error) << "Virtual mic: couldn't initialize audio client: [0x"sv << util::hex(status).to_string_view() << ']';
-        return;
+        if (!quiet) {
+          BOOST_LOG(error) << "Virtual mic: couldn't initialize audio client: [0x"sv << util::hex(status).to_string_view() << ']';
+        }
+        return false;
       }
 
       UINT32 buffer_frames = 0;
@@ -1278,8 +1304,10 @@ namespace platf::audio {
       audio_render_t audio_render;
       status = audio_client->GetService(IID_IAudioRenderClient, (void **) &audio_render);
       if (FAILED(status)) {
-        BOOST_LOG(error) << "Virtual mic: couldn't get render client: [0x"sv << util::hex(status).to_string_view() << ']';
-        return;
+        if (!quiet) {
+          BOOST_LOG(error) << "Virtual mic: couldn't get render client: [0x"sv << util::hex(status).to_string_view() << ']';
+        }
+        return false;
       }
 
       handle_t event {CreateEventA(nullptr, FALSE, FALSE, nullptr)};
@@ -1298,7 +1326,9 @@ namespace platf::audio {
         }
 
         UINT32 padding = 0;
-        if (FAILED(audio_client->GetCurrentPadding(&padding))) {
+        status = audio_client->GetCurrentPadding(&padding);
+        if (FAILED(status)) {
+          BOOST_LOG(warning) << "Virtual mic: lost the device, reopening it: [0x"sv << util::hex(status).to_string_view() << ']';
           break;
         }
 
@@ -1317,7 +1347,9 @@ namespace platf::audio {
         }
 
         BYTE *data = nullptr;
-        if (FAILED(audio_render->GetBuffer((UINT32) frames, &data))) {
+        status = audio_render->GetBuffer((UINT32) frames, &data);
+        if (FAILED(status)) {
+          BOOST_LOG(warning) << "Virtual mic: lost the device, reopening it: [0x"sv << util::hex(status).to_string_view() << ']';
           break;
         }
         std::copy_n(std::begin(queue), frames, (float *) data);
@@ -1333,6 +1365,8 @@ namespace platf::audio {
       if (mmcss_handle) {
         AvRevertMmThreadCharacteristics(mmcss_handle);
       }
+
+      return true;
     }
 
     std::wstring device_id;

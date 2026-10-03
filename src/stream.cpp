@@ -1112,16 +1112,22 @@ namespace stream {
       // 120 ms is the largest Opus frame
       std::array<float, 5760> pcm;
 
+      auto opus_data = (const unsigned char *) payload.data() + sizeof(seq);
+      auto opus_size = (opus_int32) (payload.size() - sizeof(seq));
+
       // Conceal a short run of lost packets. After a longer gap, just resume.
-      for (auto x = 0; x < std::min(gap, 5); ++x) {
-        auto samples = opus_decode_float(mic.decoder.get(), nullptr, 0, pcm.data(), mic.last_frame_size, 0);
+      // The frame right before this packet is recovered from its in-band FEC
+      // data, and the rest are filled in with PLC.
+      auto lost = std::min(gap, 5);
+      for (auto x = 0; x < lost; ++x) {
+        auto fec = x == lost - 1;
+        auto samples = opus_decode_float(mic.decoder.get(), fec ? opus_data : nullptr, fec ? opus_size : 0, pcm.data(), mic.last_frame_size, fec);
         if (samples > 0) {
           mic.sink->write(pcm.data(), samples);
         }
       }
 
-      auto opus_data = (const unsigned char *) payload.data() + sizeof(seq);
-      auto samples = opus_decode_float(mic.decoder.get(), opus_data, (opus_int32) (payload.size() - sizeof(seq)), pcm.data(), (int) pcm.size(), 0);
+      auto samples = opus_decode_float(mic.decoder.get(), opus_data, opus_size, pcm.data(), (int) pcm.size(), 0);
       if (samples < 0) {
         BOOST_LOG(warning) << "Couldn't decode microphone packet: "sv << opus_strerror(samples);
         return;
